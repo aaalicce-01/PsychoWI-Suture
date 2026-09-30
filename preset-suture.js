@@ -10,7 +10,7 @@
     const CURRENT_VERSION = WI_VERSION;
     try {
       const r = await fetch(
-        'https://cdn.jsdelivr.net/gh/aaalicce-01/PsychoWI@main/version.json?_=' + Date.now(),
+        'https://cdn.jsdelivr.net/gh/aaalicce-01/PsychoWI-Suture@main/version.json?_=' + Date.now(),
         { cache: 'no-store' }
       );
       if (!r.ok) return;
