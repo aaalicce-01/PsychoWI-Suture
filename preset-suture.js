@@ -3,23 +3,10 @@
   // [HEADER] 实例管理 / 版本检测
   // ============================================================
   const WI_INSTANCE_ID = 'psychowi-preset-suture';
-  const WI_VERSION = '1.0.0';
+  const WI_VERSION = '1.0.1';
   const __wiInstanceInfo = { id: WI_INSTANCE_ID, version: WI_VERSION, ts: Date.now(), kill: null };
 
-  (async function checkWiUpdate() {
-    const CURRENT_VERSION = WI_VERSION;
-    try {
-      const r = await fetch(
-        'https://cdn.jsdelivr.net/gh/aaalicce-01/PsychoWI-Suture@main/version.json?_=' + Date.now(),
-        { cache: 'no-store' }
-      );
-      if (!r.ok) return;
-      const data = await r.json();
-      if (data.presetSutureVersion && data.presetSutureVersion !== CURRENT_VERSION) {
-        console.log(`[预设缝合器] 检测到新版本 ${data.presetSutureVersion}（当前 ${CURRENT_VERSION}）`);
-      }
-    } catch (e) { }
-  })();
+  // （自动更新检测已移除：改用动态 import + 时间戳，每次刷新自动拉最新）
 
   function __wiCompareVer(a, b) {
     const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
@@ -104,6 +91,20 @@
 
   const PANEL_ID = 'wi_preset_suture_panel';
   const BTN_ID = 'wi_preset_suture_btn';
+
+  // ★ TauriTavern（TT 手机 APK）环境检测
+  function isTauriTavernEnv() {
+    try {
+      if (typeof window !== 'undefined' && window.__TAURITAVERN__) return true;
+      if (typeof __wiTopWin !== 'undefined' && __wiTopWin && __wiTopWin.__TAURITAVERN__) return true;
+    } catch (e) { }
+    // 兜底：UA 里带 tauri / tauritavern
+    try {
+      const ua = String(navigator.userAgent || '');
+      if (/tauritavern|tauri/i.test(ua)) return true;
+    } catch (e) { }
+    return false;
+  }
 
   const __wiRootDoc = (function () {
     try {
@@ -846,15 +847,32 @@ ${blocks}
   function huDiffPresets(oldPreset, newPreset) {
     const getList = (preset) => {
       const raw = Array.isArray(preset?.prompts) ? preset.prompts : [];
+      // ★ 从 extensions 里读缝合来源表（identifier -> 来源）
+      const originsMap = preset?.extensions?.wi_preset_suture_origins || {};
       return raw
         .filter(p => p && typeof p === 'object')
-        .map(p => ({
-          id: p.identifier || p.id || '',
-          name: (p.name || '').trim(),
-          content: p.content || '',
-          enabled: p.enabled !== false,
-          raw: p,
-        }))
+        .map(p => {
+          const nm = (p.name || '').trim();
+          const id = p.identifier || p.id || '';
+          // ★ 优先用 extensions 里的记录；其次用条目自带字段（老兼容）；
+          //   最后从名字里解析 [来自...] 后缀（老老格式）
+          let sutureFrom = originsMap[id] || p._wiSutureFrom || null;
+          if (!sutureFrom) {
+            const m = nm.match(/^(.*?)\s*\[来自(.+?)\]\s*$/);
+            if (m) {
+              sutureFrom = m[2].trim();
+            }
+          }
+          return {
+            id,
+            name: nm,
+            content: p.content || '',
+            enabled: p.enabled !== false,
+            _wiSutureFrom: sutureFrom,
+            _wiOldFormat: !originsMap[id] && !p._wiSutureFrom && !!sutureFrom,
+            raw: p,
+          };
+        })
         .filter(p => p.id);
     };
 
@@ -892,8 +910,9 @@ ${blocks}
         diffs.push({
           status: 'deleted',
           id,
-          key,          // ★ 补 key
+          key,
           name: o.name,
+          oldEntry: o.raw,
           oldContent: o.content,
           newContent: '',
           oldContentRaw: o.content,
@@ -902,6 +921,7 @@ ${blocks}
           newLen: 0,
           oldEnabled: o.enabled,
           newEntry: null,
+          _wiSutureFrom: o._wiSutureFrom || null,   // ★
         });
       } else if (!o && n) {
         console.log('[diff][added] key=', key, ' name=', n.name, ' raw=', !!n.raw);
@@ -918,6 +938,7 @@ ${blocks}
           newLen: n.content.length,
           newEnabled: n.enabled,
           newEntry: n.raw,
+          _wiSutureFrom: n._wiSutureFrom || null,   // ★
         });
       } else if (o && n) {
         const nameChanged = o.name !== n.name;
@@ -927,7 +948,7 @@ ${blocks}
         const contentChanged = oContentStripped !== nContentStripped;
         const enabledChanged = o.enabled !== n.enabled;
         // ★ 只有名字或"去变量后的内容"变了才算差异
-        if (nameChanged || contentChanged) {
+        if (nameChanged || contentChanged || enabledChanged) {
           diffs.push({
             status: 'modified',
             id,
@@ -947,6 +968,7 @@ ${blocks}
             newEnabled: n.enabled,
             nameChanged, contentChanged, enabledChanged,
             newEntry: n.raw,
+            _wiSutureFrom: n._wiSutureFrom || o._wiSutureFrom || null,   // ★
           });
         }
       }
@@ -955,6 +977,7 @@ ${blocks}
     // 排序：新增 → 修改 → 删除
     const order = { added: 0, modified: 1, deleted: 2 };
     diffs.sort((a, b) => order[a.status] - order[b.status]);
+    window.__wiLastDiffs = diffs;   // 保留，方便后续调试
     return diffs;
   }
 
@@ -1058,6 +1081,7 @@ ${blocks}
     </div>
 
     <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-bottom:14px">
+      <button id="wi_hu_migrate_old" style="${BTN_AI_CSS}padding:8px 16px;font-size:12px">🔧 迁移老缝合痕迹</button>
       <button id="wi_hu_compare" style="${BTN_PRIMARY_CSS}padding:8px 24px;font-size:13px" disabled>🔍 对比</button>
     </div>
 
@@ -1118,6 +1142,41 @@ ${blocks}
       }
     });
 
+    // ★ 迁移老缝合痕迹
+    $container.find('#wi_hu_migrate_old').on('click', () => {
+      const name = $container.find('#wi_hu_old_preset').val();
+      if (!name) { alert('未选旧版预设'); return; }
+      const preset = readPreset(name);
+      if (!preset) { alert('读取失败'); return; }
+
+      // 扫出所有名字带 [来自...] 的条目
+      const raw = Array.isArray(preset.prompts) ? preset.prompts : [];
+      const targets = [];
+      raw.forEach((p, idx) => {
+        if (!p || typeof p !== 'object') return;
+        const nm = (p.name || '').trim();
+        const m = nm.match(/^(.*?)\s*\[来自(.+?)\]\s*$/);
+        if (m) {
+          const id = p.identifier || p.id || '';
+          targets.push({
+            idx,
+            id,
+            oldName: nm,
+            newName: m[1].trim(),
+            from: m[2].trim(),
+          });
+        }
+      });
+
+      if (targets.length === 0) {
+        alert('✅ 没发现名字里带 [来自...] 的老缝合条目，无需迁移。');
+        return;
+      }
+
+      // 弹窗让用户确认
+      showMigrateConfirmDialog(name, preset, targets);
+    });
+
     $container.find('#wi_hu_compare').on('click', () => {
       if (!oldJson || !newJson) return;
       const diffs = huDiffPresets(oldJson, newJson);
@@ -1159,9 +1218,9 @@ ${blocks}
       return `
         <div class="wi-hu-diff-item" data-idx="${i}" style="border:1px solid var(--wi-border);border-radius:6px;padding:8px;margin-bottom:8px;background:var(--wi-bg-1)">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-            <input type="checkbox" class="wi-hu-diff-cb" data-idx="${i}" ${/\[来自/.test(d.name) ? '' : 'checked'} style="cursor:pointer">
+            <input type="checkbox" class="wi-hu-diff-cb" data-idx="${i}" ${d._wiSutureFrom ? '' : 'checked'} style="cursor:pointer">
             <span style="font-size:12px;color:${sm.color};font-weight:600">${sm.icon} ${sm.text}</span>
-            <span style="font-size:12px;color:var(--wi-text);font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(d.name)}</span>
+            <span style="font-size:12px;color:var(--wi-text);font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(d.name)}${d._wiSutureFrom ? ` <span style="font-size:10px;color:var(--wi-accent-2);background:var(--wi-bg-2);padding:1px 5px;border-radius:3px;font-weight:400">🩹 ${escapeHtml(d._wiSutureFrom)}</span>` : ''}</span>
             ${summaryHtml}
           </label>
           <div style="margin-top:4px">
@@ -1172,23 +1231,73 @@ ${blocks}
       `;
     }).join('');
 
+    // ★ 统计各类数量
+    const catCount = { added: 0, modified: 0, deleted: 0, suture: 0 };
+    diffs.forEach(d => {
+      const isSuture = !!d._wiSutureFrom;
+      if (isSuture) catCount.suture++;
+      else if (d.status === 'added') catCount.added++;
+      else if (d.status === 'modified') catCount.modified++;
+      else if (d.status === 'deleted') catCount.deleted++;
+    });
+
     $container.html(`
       <div style="font-size:14px;font-weight:700;color:var(--wi-text);margin-bottom:6px">🔍 差异对比（共 ${diffs.length} 处）</div>
       <div style="font-size:11px;color:var(--wi-text-dim);margin-bottom:10px;line-height:1.6">
         <b style="color:var(--wi-text)">默认全部勾选</b>。不想应用的取消勾选即可。<br>
-        <span style="color:var(--wi-warn)">💡 通过缝合器缝合的条目自带 <code class="wi-code-accent">[来自...]</code> 后缀，默认<b>不勾选</b>，需要时手动勾上。</span>
+        <span style="color:var(--wi-warn)">💡 缝合进来的条目（新老都算）默认<b>不勾选</b>，需要时手动勾上。</span>
       </div>
-      <div style="max-height:50vh;overflow-y:auto;padding-right:4px">
+      <div id="wi_hu_filter_bar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--wi-border-soft)">
+        <button class="wi-hu-filter-btn" data-filter="all" style="${BTN_CSS}font-size:11px;padding:4px 10px;background:var(--wi-accent);color:var(--wi-btn-fg,#fff);border-color:var(--wi-accent)">全部 ${diffs.length}</button>
+        <button class="wi-hu-filter-btn" data-filter="added" style="${BTN_CSS}font-size:11px;padding:4px 10px;color:var(--wi-ok);border-color:var(--wi-ok)">🟢 新增 ${catCount.added}</button>
+        <button class="wi-hu-filter-btn" data-filter="modified" style="${BTN_CSS}font-size:11px;padding:4px 10px;color:var(--wi-warn);border-color:var(--wi-warn)">🟡 修改 ${catCount.modified}</button>
+        <button class="wi-hu-filter-btn" data-filter="deleted" style="${BTN_CSS}font-size:11px;padding:4px 10px;color:var(--wi-err);border-color:var(--wi-err)">🔴 删除 ${catCount.deleted}</button>
+        <button class="wi-hu-filter-btn" data-filter="suture" style="${BTN_CSS}font-size:11px;padding:4px 10px;color:var(--wi-accent-2);border-color:var(--wi-accent-2)">🩹 缝合 ${catCount.suture}</button>
+      </div>
+      <div id="wi_hu_diff_list" style="max-height:50vh;overflow-y:auto;padding-right:4px">
         ${diffHtml}
       </div>
       <div style="margin-top:10px;display:flex;gap:6px;justify-content:space-between;align-items:center;flex-wrap:wrap">
         <div style="display:flex;gap:6px">
-          <button class="wi-hu-all" style="${BTN_CSS}font-size:11px">全选</button>
-          <button class="wi-hu-none" style="${BTN_CSS}font-size:11px">全不选</button>
+          <button class="wi-hu-batch" style="${BTN_CSS}font-size:11px">🎛 批量选择</button>
         </div>
         <button class="wi-hu-apply" style="${BTN_PRIMARY_CSS}padding:8px 20px;font-size:13px">✅ 应用选中的改动</button>
       </div>
     `);
+
+    // ★ 筛选按钮
+    $container.find('.wi-hu-filter-btn').on('click', function () {
+      const filter = $(this).attr('data-filter');
+
+      // 切换按钮高亮
+      $container.find('.wi-hu-filter-btn').each(function () {
+        const f = $(this).attr('data-filter');
+        if (f === filter) {
+          $(this).css({ background: 'var(--wi-accent)', color: 'var(--wi-btn-fg,#fff)', borderColor: 'var(--wi-accent)' });
+        } else {
+          $(this).css({ background: 'var(--wi-bg-2)', color: '', borderColor: 'var(--wi-border)' });
+          // 恢复原本的颜色文字
+          if (f === 'added') $(this).css('color', 'var(--wi-ok)').css('borderColor', 'var(--wi-ok)');
+          if (f === 'modified') $(this).css('color', 'var(--wi-warn)').css('borderColor', 'var(--wi-warn)');
+          if (f === 'deleted') $(this).css('color', 'var(--wi-err)').css('borderColor', 'var(--wi-err)');
+          if (f === 'suture') $(this).css('color', 'var(--wi-accent-2)').css('borderColor', 'var(--wi-accent-2)');
+        }
+      });
+
+      // 显示/隐藏
+      $container.find('.wi-hu-diff-item').each(function () {
+        const idx = Number($(this).attr('data-idx'));
+        const d = diffs[idx];
+        if (!d) return;
+        const isSuture = !!d._wiSutureFrom;
+        const cat = isSuture ? 'suture' : d.status;
+        if (filter === 'all' || cat === filter) {
+          $(this).show();
+        } else {
+          $(this).hide();
+        }
+      });
+    });
 
     $container.find('.wi-hu-expand').on('click', function () {
       const idx = Number($(this).data('idx'));
@@ -1222,8 +1331,191 @@ ${blocks}
       $(this).text('收起 ▲');
     });
 
-    $container.find('.wi-hu-all').on('click', () => $container.find('.wi-hu-diff-cb').prop('checked', true));
-    $container.find('.wi-hu-none').on('click', () => $container.find('.wi-hu-diff-cb').prop('checked', false));
+    // ★ 分类批量勾选：浮层 popover（点旁边失焦消失，实时生效）
+    function openBatchPopover($anchor) {
+      // 关掉已有的
+      __wiRootDoc.querySelectorAll('#wi_ps_batch_popover').forEach(el => el.remove());
+
+      const catCount = { added: 0, modified: 0, deleted: 0, suture: 0 };
+      diffs.forEach(d => {
+        const isSuture = !!d._wiSutureFrom;
+        if (isSuture) catCount.suture++;
+        else if (d.status === 'added') catCount.added++;
+        else if (d.status === 'modified') catCount.modified++;
+        else if (d.status === 'deleted') catCount.deleted++;
+      });
+
+      // 判断当前每类的"勾选状态"：全勾 / 全不勾 / 部分
+      function catState(cat) {
+        let total = 0, checked = 0;
+        $container.find('.wi-hu-diff-cb').each(function () {
+          const idx = Number($(this).data('idx'));
+          const d = diffs[idx];
+          if (!d) return;
+          const isSuture = !!d._wiSutureFrom;
+          const c = isSuture ? 'suture' : d.status;
+          if (c !== cat) return;
+          total++;
+          if ($(this).is(':checked')) checked++;
+        });
+        return { total, checked, all: total > 0 && checked === total, none: checked === 0 };
+      }
+
+      const $pop = $('<div id="wi_ps_batch_popover">').css({
+        position: 'absolute',
+        background: 'var(--wi-box-bg)',
+        border: '1px solid var(--wi-border)',
+        borderRadius: '8px',
+        padding: '8px',
+        minWidth: '240px',
+        zIndex: 1000030,
+        boxShadow: 'var(--SmartThemeShadowColor, 0 8px 24px rgba(0,0,0,.5))',
+        color: 'var(--wi-text)',
+      });
+
+      // 标题
+      $pop.append(`
+        <div style="font-size:11px;color:var(--wi-text-dim);padding:2px 8px 6px;border-bottom:1px solid var(--wi-border-soft);margin-bottom:6px">🎛 批量选择（点类别 = 全勾/全不勾）</div>
+      `);
+
+      // 四行分类
+      const cats = [
+        { key: 'added',    label: '🟢 新增', color: 'var(--wi-ok)' },
+        { key: 'modified', label: '🟡 修改', color: 'var(--wi-warn)' },
+        { key: 'deleted',  label: '🔴 删除', color: 'var(--wi-err)' },
+        { key: 'suture',   label: '🩹 缝合', color: 'var(--wi-accent-2)' },
+      ];
+
+      cats.forEach(c => {
+        const st = catState(c.key);
+        const count = catCount[c.key];
+        const disabled = count === 0;
+        const rowHtml = `
+          <div class="wi-ps-pop-row" data-cat="${c.key}" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:5px;cursor:${disabled ? 'not-allowed' : 'pointer'};opacity:${disabled ? 0.4 : 1}">
+            <input type="checkbox" class="wi-ps-pop-cb" data-cat="${c.key}" ${st.all ? 'checked' : ''} ${disabled ? 'disabled' : ''} style="cursor:pointer">
+            <span style="flex:1;font-size:12px;color:${c.color}">${c.label}</span>
+            <span style="font-size:11px;color:var(--wi-text-dim)">${st.checked}/${count}</span>
+          </div>
+        `;
+        $pop.append(rowHtml);
+      });
+
+      // 底部快捷：全部勾 / 全部不勾
+      $pop.append(`
+        <div style="border-top:1px solid var(--wi-border-soft);margin-top:6px;padding-top:6px;display:flex;gap:6px">
+          <button class="wi-ps-pop-all" style="${BTN_CSS}flex:1;font-size:11px;padding:4px 8px">全部勾</button>
+          <button class="wi-ps-pop-none" style="${BTN_CSS}flex:1;font-size:11px;padding:4px 8px">全部不勾</button>
+        </div>
+      `);
+
+      $('#' + PANEL_ID).append($pop);
+
+      // ★ 定位到按钮下方
+      const anchorRect = $anchor[0].getBoundingClientRect();
+      const panelEl = $('#' + PANEL_ID)[0];
+      const panelRect = panelEl.getBoundingClientRect();
+
+      // 相对面板定位
+      let left = anchorRect.left - panelRect.left;
+      let top = anchorRect.bottom - panelRect.top + 4;
+
+      // 防止超出面板右边界
+      const popW = $pop.outerWidth();
+      const panelW = panelRect.width;
+      if (left + popW > panelW - 8) left = panelW - popW - 8;
+      if (left < 8) left = 8;
+
+      // 防止超出面板下边界（如果超了，就往上弹）
+      const popH = $pop.outerHeight();
+      const panelH = panelRect.height;
+      if (top + popH > panelH - 8) {
+        top = anchorRect.top - panelRect.top - popH - 4;
+        if (top < 8) top = 8;
+      }
+
+      $pop.css({ left: left + 'px', top: top + 'px' });
+
+      // ★ 应用某个分类的勾选状态
+      function applyCat(cat, checked) {
+        $container.find('.wi-hu-diff-cb').each(function () {
+          const idx = Number($(this).data('idx'));
+          const d = diffs[idx];
+          if (!d) return;
+          const isSuture = !!d._wiSutureFrom;
+          const c = isSuture ? 'suture' : d.status;
+          if (c !== cat) return;
+          $(this).prop('checked', checked);
+        });
+      }
+
+      // ★ 刷新 popover 里的计数 + 复选框状态
+      function refreshPop() {
+        $pop.find('.wi-ps-pop-row').each(function () {
+          const cat = $(this).attr('data-cat');
+          const st = catState(cat);
+          const count = catCount[cat];
+          $(this).find('.wi-ps-pop-cb').prop('checked', st.all);
+          $(this).find('span').eq(1).text(`${st.checked}/${count}`);
+        });
+      }
+
+      // 行点击 → 切换该类（全勾 ↔ 全不勾）
+      $pop.find('.wi-ps-pop-row').on('click', function (e) {
+        if (e.target.tagName === 'INPUT') return;  // 复选框自己处理
+        const cat = $(this).attr('data-cat');
+        const count = catCount[cat];
+        if (count === 0) return;
+        const st = catState(cat);
+        applyCat(cat, !st.all);
+        refreshPop();
+      });
+
+      // 复选框直接点
+      $pop.find('.wi-ps-pop-cb').on('click', function (e) {
+        e.stopPropagation();
+        const cat = $(this).attr('data-cat');
+        applyCat(cat, $(this).is(':checked'));
+        refreshPop();
+      });
+
+      $pop.find('.wi-ps-pop-all').on('click', () => {
+        $container.find('.wi-hu-diff-cb').prop('checked', true);
+        refreshPop();
+      });
+      $pop.find('.wi-ps-pop-none').on('click', () => {
+        $container.find('.wi-hu-diff-cb').prop('checked', false);
+        refreshPop();
+      });
+
+      // ★ 失焦关闭：点别处就消失
+      setTimeout(() => {
+        const closeHandler = (ev) => {
+          // 如果点的是 popover 自己，忽略
+          if ($pop[0] && $pop[0].contains(ev.target)) return;
+          // 如果点的是触发按钮，忽略（让按钮自己的 click 处理）
+          if ($anchor[0] && $anchor[0].contains(ev.target)) return;
+          $pop.remove();
+          __wiRootDoc.removeEventListener('mousedown', closeHandler, true);
+        };
+        __wiRootDoc.addEventListener('mousedown', closeHandler, true);
+        // 存一份，popover 被移除时也清掉
+        $pop.data('_closeHandler', closeHandler);
+      }, 0);
+    }
+
+    // 按钮点击 → 打开 popover
+    $container.find('.wi-hu-batch').on('click', function (e) {
+      e.stopPropagation();
+      const $pop = $('#wi_ps_batch_popover');
+      if ($pop.length) {
+        // 已开着 → 关闭
+        const h = $pop.data('_closeHandler');
+        if (h) __wiRootDoc.removeEventListener('mousedown', h, true);
+        $pop.remove();
+        return;
+      }
+      openBatchPopover($(this));
+    });
 
     $container.find('.wi-hu-apply').on('click', () => {
       const selected = [];
@@ -1238,8 +1530,127 @@ ${blocks}
     });
   }
 
+  // ============================================================
+  // [MIGRATE OLD] 迁移老缝合痕迹：[来自...] 后缀 → extensions 记录
+  // ============================================================
+  function showMigrateConfirmDialog(presetName, preset, targets) {
+    const MASK_ID = 'wi_ps_migrate_mask';
+    __wiRootDoc.querySelectorAll('#' + MASK_ID).forEach(el => el.remove());
+
+const $mask = $('<div id="' + MASK_ID + '">').css({
+  position: 'absolute', inset: 0, background: 'var(--wi-mask-strong)', zIndex: 1000050,
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  padding: '8px', boxSizing: 'border-box', overflowY: 'auto',
+});
+    const $box = $('<div>').addClass('wi-ps-mobile-box').css({
+      background: 'var(--wi-box-bg)', border: '1px solid var(--wi-border)', borderRadius: '10px',
+      padding: '18px', width: '720px', maxWidth: '95vw', maxHeight: '92vh',
+      overflow: 'auto', color: 'var(--wi-text)', boxShadow: 'var(--SmartThemeShadowColor, 0 12px 40px rgba(0,0,0,.7))',
+    });
+
+    let html = `
+      <div style="font-size:16px;font-weight:700;color:var(--wi-accent-2);margin-bottom:6px">🔧 迁移老缝合痕迹</div>
+      <div style="font-size:11px;color:var(--wi-text-dim);margin-bottom:14px;line-height:1.7">
+        预设：<b style="color:var(--wi-accent)">${escapeHtml(presetName)}</b>
+      </div>
+
+      <div style="background:var(--wi-bg-1);border:1px solid var(--wi-border);border-radius:6px;padding:10px;margin-bottom:12px;font-size:11px;color:var(--wi-text);line-height:1.7">
+        发现 <b style="color:var(--wi-warn)">${targets.length}</b> 条名字里带 <code class="wi-code-warn">[来自...]</code> 后缀的条目。<br>
+        迁移会：<br>
+        · 把名字后缀<b>剥掉</b>（名字变干净）<br>
+        · 把来源信息<b>改存到预设的 extensions 里</b>（不污染条目）<br>
+        · 迁移后仍能被热更新识别为"🩹 缝合"类
+      </div>
+
+      <div style="background:var(--wi-bg-0);border:1px solid var(--wi-border-soft);border-radius:6px;padding:8px;margin-bottom:14px;max-height:280px;overflow-y:auto;font-size:11px;line-height:1.7">
+        ${targets.map((t, i) => `
+          <div style="padding:6px 8px;border-bottom:1px dashed var(--wi-border-soft)">
+            <div>#${i + 1} <span style="color:var(--wi-err);text-decoration:line-through">${escapeHtml(t.oldName)}</span></div>
+            <div style="color:var(--wi-ok);margin-left:12px">→ ${escapeHtml(t.newName)}</div>
+            <div style="color:var(--wi-text-dim);margin-left:12px;font-size:10px">来源：${escapeHtml(t.from)}</div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div style="font-size:11px;color:var(--wi-text-dim);margin-bottom:12px;line-height:1.6">
+        ⚠️ 迁移会<b>立即写回预设</b>。写入前会自动备份一份。
+      </div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+        <button id="wi_ps_mig_cancel" style="${BTN_CSS}">取消</button>
+        <button id="wi_ps_mig_run" style="${BTN_PRIMARY_CSS}padding:8px 24px;font-size:13px">✅ 确认迁移（${targets.length} 条）</button>
+      </div>
+    `;
+
+    $box.html(html);
+    $mask.append($box);
+    $('#' + PANEL_ID).append($mask);
+
+    // （调试已删）
+    $box.find('#wi_ps_mig_cancel').on('click', () => $mask.remove());
+
+    $box.find('#wi_ps_mig_run').on('click', async () => {
+      $mask.remove();
+      await doMigrateOldSuture(presetName, preset, targets);
+    });
+  }
+
+  async function doMigrateOldSuture(presetName, preset, targets) {
+    const newPreset = JSON.parse(JSON.stringify(preset));
+
+    // 确保 extensions 存在
+    if (!newPreset.extensions) newPreset.extensions = {};
+    if (!newPreset.extensions.wi_preset_suture_origins) {
+      newPreset.extensions.wi_preset_suture_origins = {};
+    }
+
+    let count = 0;
+    const raw = Array.isArray(newPreset.prompts) ? newPreset.prompts : [];
+    targets.forEach(t => {
+      const p = raw[t.idx];
+      if (!p) return;
+      // 双保险：再判一次名字，防止中途被改
+      const nm = (p.name || '').trim();
+      const m = nm.match(/^(.*?)\s*\[来自(.+?)\]\s*$/);
+      if (!m) return;
+      p.name = m[1].trim();
+      const id = p.identifier || p.id || '';
+      if (id) {
+        newPreset.extensions.wi_preset_suture_origins[id] = m[2].trim();
+      }
+      count++;
+    });
+
+    showLoadingMask('🔧 正在迁移老缝合痕迹…', `共 ${count} 条`);
+    await createBackup(presetName, '迁移老缝合');
+    let ok = false;
+    try {
+      ok = await writePreset(presetName, newPreset);
+    } finally {
+      hideLoadingMask();
+    }
+
+    if (ok) {
+      if (window.toastr) window.toastr.success(`✅ 已迁移 ${count} 条老缝合痕迹`);
+      else alert(`✅ 已迁移 ${count} 条`);
+
+      // 重载
+      try {
+        const cur = getCurrentPresetName();
+        if (cur === presetName && typeof window.loadPreset === 'function') {
+          window.loadPreset(cur);
+        }
+      } catch (e) { }
+
+      // 刷新热更新界面
+      renderHotUpdateUI();
+    } else {
+      alert('❌ 写入失败，看 F12');
+    }
+  }
+
   async function applyPresetHotUpdate(targetName, diffs, selectedIdx) {
-    // ★ targetName 既是缝合痕迹来源，也是写回对象（原地升级）
+    // ★ 基底 = 旧预设（a），勾选的新版条目（d）才插进来
     const oldTarget = readPreset(targetName);
     if (!oldTarget) { alert('读取预设失败：' + targetName); return; }
 
@@ -1249,161 +1660,260 @@ ${blocks}
       return;
     }
 
-    // ★ 基底 = 新版 JSON（深拷贝）
-    const result = JSON.parse(JSON.stringify(newJson));
-    let newPrompts = Array.isArray(result.prompts) ? result.prompts.slice() : [];
+    // ★ 深拷贝旧预设当基底
+    const result = JSON.parse(JSON.stringify(oldTarget));
 
-    // ★ 旧版（缝合痕迹来源）里的条目：按名字建索引
-    const oldPrompts = Array.isArray(oldTarget.prompts)
-      ? oldTarget.prompts.filter(p => p && typeof p === 'object')
-      : [];
-    const oldByName = new Map();
-    oldPrompts.forEach((p, i) => {
-      const nm = (p.name || '').trim();
-      if (nm && !oldByName.has(nm)) oldByName.set(nm, { entry: p, idx: i });
+    const fmt = getPresetFormat(oldTarget);
+    const oldPromptsRaw = Array.isArray(result.prompts) ? result.prompts : [];
+    const oldOrderRaw = Array.isArray(result.prompt_order) ? result.prompt_order : [];
+
+    // ★ 用"有序条目数组"来操作，这样"位置序号"就是数组下标
+    //   每条：{ identifier, name, content, enabled, raw }
+    function buildOrderedList(preset, prompts, order) {
+      const norm = prompts.map(p => {
+        if (!p || typeof p !== 'object') return p;
+        if (!p.identifier && p.id) return { ...p, identifier: p.id };
+        return p;
+      }).filter(p => p && typeof p === 'object' && p.identifier);
+
+      const map = new Map();
+      norm.forEach(p => map.set(p.identifier, p));
+
+      const out = [];
+      const seen = new Set();
+
+      if (Array.isArray(order) && order.length > 0 && Array.isArray(order[0]?.order)) {
+        order[0].order.forEach(o => {
+          const id = o.identifier || o.id;
+          const p = map.get(id);
+          if (p && !seen.has(id)) {
+            seen.add(id);
+            out.push({ identifier: id, name: p.name || '', content: p.content || '', enabled: o.enabled !== false, raw: p });
+          }
+        });
+      } else if (Array.isArray(order) && order.length > 0 && (order[0]?.identifier || order[0]?.id)) {
+        order.forEach(o => {
+          const id = o.identifier || o.id;
+          const p = map.get(id);
+          if (p && !seen.has(id)) {
+            seen.add(id);
+            out.push({ identifier: id, name: p.name || '', content: p.content || '', enabled: o.enabled !== false, raw: p });
+          }
+        });
+      }
+
+      norm.forEach(p => {
+        if (!seen.has(p.identifier)) {
+          seen.add(p.identifier);
+          out.push({ identifier: p.identifier, name: p.name || '', content: p.content || '', enabled: p.enabled !== false, raw: p });
+        }
+      });
+
+      return out;
+    }
+
+    const oldList = buildOrderedList(oldTarget, oldPromptsRaw, oldOrderRaw);
+
+    // ★ 新版的有序列表
+    const newPrompts = Array.isArray(newJson.prompts) ? newJson.prompts : [];
+    const newOrder = Array.isArray(newJson.prompt_order) ? newJson.prompt_order : [];
+    const newList = buildOrderedList(newJson, newPrompts, newOrder);
+
+    // ★ 建立 name -> 新版有序列表下标 的映射（用于计算 d 的位置序号）
+    const newIdxByName = new Map();
+    const newIdxById = new Map();
+    newList.forEach((e, i) => {
+      if (e.name && !newIdxByName.has(e.name)) newIdxByName.set(e.name, i);
+      if (e.identifier && !newIdxById.has(e.identifier)) newIdxById.set(e.identifier, i);
     });
 
-    // ★ 新版（基底）里的条目：按名字建索引
-    function rebuildNewIndex() {
-      const m = new Map();
-      newPrompts.forEach((p, i) => {
-        const nm = (p && p.name || '').trim();
-        if (nm) m.set(nm, i);
-      });
-      return m;
-    }
-    let newByName = rebuildNewIndex();
+    // ★ 当前 a 的 identifier 集合（用于判断"是否已存在"）
+    const oldIdSet = new Set(oldList.map(e => e.identifier));
+    const oldNameMap = new Map();
+    oldList.forEach((e, i) => {
+      if (e.name && !oldNameMap.has(e.name)) oldNameMap.set(e.name, i);
+    });
+
+    // ★ 待插入 / 待修改 的任务
+    const toInsert = [];   // { newEntry, insertAt }
+    const toModify = [];   // { targetId, newContent, newName, newEnabled }
 
     let added = 0, merged = 0;
 
-    // ============================================================
-    // 步骤 1：把旧版里的 [来自...] 缝合条目搬进新版
-    // ============================================================
-    const sutureEntries = oldPrompts.filter(p => /\[来自/.test(p.name || ''));
-    console.log('[热更新] 旧版里缝合痕迹条目数:', sutureEntries.length);
+    for (const idx of selectedIdx) {
+      const d = diffs[idx];
+      if (!d) continue;
 
-    // ★ 按旧版里的顺序处理（保证相对顺序不乱）
-    sutureEntries.forEach(entry => {
-      const nm = (entry.name || '').trim();
-      if (newByName.has(nm)) {
-        console.log('[热更新] [来自] 条目已存在，跳过:', nm);
-        return;
-      }
-      // 找旧版里它前面那条（不含 [来自）的名字当锚点
-      const oldIdx = oldByName.get(nm)?.idx;
-      let anchorName = null;
-      if (oldIdx !== undefined) {
-        for (let k = oldIdx - 1; k >= 0; k--) {
-          const prevName = (oldPrompts[k]?.name || '').trim();
-          if (prevName && !/\[来自/.test(prevName)) {
-            anchorName = prevName;
-            break;
-          }
+      if (d.status === 'added') {
+        // ★ 新版有、旧版没有 → 插进来
+        const newEntry = newList.find(e =>
+          (newIdxByName.get(d.name) !== undefined && e.name === d.name) ||
+          (d.newEntry && e.identifier === (d.newEntry.identifier || d.newEntry.id))
+        );
+        if (!newEntry) {
+          console.warn('[热更新] 找不到新版条目：', d.name);
+          continue;
         }
-      }
-      // 在新版里找锚点
-      let insertAt = newPrompts.length;
-      if (anchorName && newByName.has(anchorName)) {
-        insertAt = newByName.get(anchorName) + 1;
-        // ★ 锚点后面可能已经有搬过来的 [来自] 条目，要插到它们后面
-        while (insertAt < newPrompts.length && /\[来自/.test(newPrompts[insertAt]?.name || '')) {
-          insertAt++;
+        // ★ d 在 b 里的位置序号
+        const bIdx = newList.findIndex(e => e.identifier === newEntry.identifier);
+        toInsert.push({ newEntry, bIdx });
+        added++;
+
+      } else if (d.status === 'modified') {
+        // ★ 用新版内容覆盖旧版同名/同 id 那条
+        let targetId = null;
+        // 先按 identifier 找
+        if (d.newEntry) {
+          const nid = d.newEntry.identifier || d.newEntry.id;
+          if (nid && oldIdSet.has(nid)) targetId = nid;
         }
+        // 再按名字找
+        if (!targetId) {
+          const byNameIdx = oldNameMap.get(d.name);
+          if (byNameIdx !== undefined) targetId = oldList[byNameIdx].identifier;
+        }
+        if (!targetId) {
+          console.warn('[热更新] 找不到修改目标：', d.name);
+          continue;
+        }
+        const newContent = d.newEntry ? (d.newEntry.content || '') : (d.newContentRaw || d.newContent || '');
+        const newName = d.newEntry ? (d.newEntry.name || d.name) : d.name;
+        const newEnabled = d.newEntry ? (d.newEntry.enabled !== false) : (d.newEnabled !== false);
+        toModify.push({ targetId, newContent, newName, newEnabled });
+        merged++;
+
+      } else if (d.status === 'deleted') {
+        // ★ 用户勾了删除 → 从旧版移除
+        let targetId = null;
+        if (d.oldEntry) {
+          const oid = d.oldEntry.identifier || d.oldEntry.id;
+          if (oid && oldIdSet.has(oid)) targetId = oid;
+        }
+        if (!targetId) {
+          const byNameIdx = oldNameMap.get(d.name);
+          if (byNameIdx !== undefined) targetId = oldList[byNameIdx].identifier;
+        }
+        if (!targetId) {
+          console.warn('[热更新] 找不到删除目标：', d.name);
+          continue;
+        }
+        toInsert.push({ _delete: true, targetId });
       }
-      newPrompts.splice(insertAt, 0, JSON.parse(JSON.stringify(entry)));
-      newByName = rebuildNewIndex();
-      added++;
-      console.log('[热更新] ✅ 搬入 [来自] 条目:', nm, ' → index', insertAt);
-    });
+    }
 
     // ============================================================
-    // 步骤 2：COT 条目里的 /* WI-SUTURE-START */ 段：合并
+    // ★ 应用修改（modify）
     // ============================================================
-    const SUTURE_START = '/* WI-SUTURE-START */';
-    const SUTURE_END = '/* WI-SUTURE-END */';
-
-    function extractSutureBlocks(content) {
-      const s = String(content || '');
-      const blocks = [];
-      const re = new RegExp(
-        SUTURE_START.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
-        '[\\s\\S]*?' +
-        SUTURE_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-        'g'
-      );
-      let m;
-      while ((m = re.exec(s)) !== null) blocks.push(m[0]);
-      return blocks;
+    for (const m of toModify) {
+      const entry = oldList.find(e => e.identifier === m.targetId);
+      if (!entry) continue;
+      entry.content = m.newContent;
+      entry.name = m.newName;
+      entry.enabled = m.newEnabled;
     }
 
-    function extractGetvarNamesFromBlock(block) {
-      const names = [];
-      const re = /\{\{getvar::([^}]+)\}\}/g;
-      let m;
-      while ((m = re.exec(block)) !== null) names.push(m[1].trim());
-      return names;
-    }
-
-    function mergeSutureBlocks(oldBlocks, newBlocks) {
-      const seen = new Set();
-      const merged = [];
-      oldBlocks.forEach(b => {
-        extractGetvarNamesFromBlock(b).forEach(n => {
-          if (!seen.has(n)) { seen.add(n); merged.push(n); }
-        });
-      });
-      newBlocks.forEach(b => {
-        extractGetvarNamesFromBlock(b).forEach(n => {
-          if (!seen.has(n)) { seen.add(n); merged.push(n); }
-        });
-      });
-      return merged;
-    }
-
-    oldPrompts.forEach(oldP => {
-      const oldBlocks = extractSutureBlocks(oldP.content || '');
-      if (oldBlocks.length === 0) return;
-
-      const nm = (oldP.name || '').trim();
-      const newIdx = newByName.get(nm);
-      if (newIdx === undefined) {
-        console.warn('[热更新] 旧版有 suture 段，但新版没有同名条目:', nm);
-        return;
+    // ============================================================
+    // ★ 应用插入（insert）：按 b 里的位置序号，从前往后插
+    // ============================================================
+    // 先处理删除（就地标记）
+    const deletedIds = [];
+    for (const t of toInsert) {
+      if (t._delete) {
+        const idx = oldList.findIndex(e => e.identifier === t.targetId);
+        if (idx >= 0) oldList.splice(idx, 1);
+        deletedIds.push(t.targetId);
       }
-      const newP = newPrompts[newIdx];
-      const newBlocks = extractSutureBlocks(newP.content || '');
-      const mergedNames = mergeSutureBlocks(oldBlocks, newBlocks);
-      if (mergedNames.length === 0) return;
+    }
+    // ★ 从 extensions 里同步移除被删条目的来源记录
+    if (deletedIds.length > 0 && result.extensions?.wi_preset_suture_origins) {
+      deletedIds.forEach(id => {
+        delete result.extensions.wi_preset_suture_origins[id];
+      });
+    }
+    // 再做插入
+    const insertions = toInsert.filter(t => !t._delete);
+    // 按 bIdx 从小到大排序，保证相对顺序
+    insertions.sort((a, b) => a.bIdx - b.bIdx);
 
-      const mergedBody = mergedNames.map(n => `{{getvar::${n}}}`).join('\n');
-      const mergedBlock = SUTURE_START + '\n' + mergedBody + '\n' + SUTURE_END;
+    for (const ins of insertions) {
+      const src = ins.newEntry;
+      const newId = uuid();
+      const cloned = JSON.parse(JSON.stringify(src.raw || {}));
+      cloned.identifier = newId;
+      cloned.id = newId;
+      cloned.name = src.name;
+      cloned.content = src.content;
+      cloned.enabled = src.enabled !== false;
 
-      let newContent = String(newP.content || '');
-      const stripRe = new RegExp(
-        SUTURE_START.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
-        '[\\s\\S]*?' +
-        SUTURE_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-        'g'
-      );
-      newContent = newContent.replace(stripRe, '').replace(/\n{3,}/g, '\n\n').trimEnd();
+      // ★ 目标位置：取 b 里的序号 bIdx，插到 oldList 的第 bIdx 位（下标从 0 开始）
+      //   如果 bIdx 超出 oldList 长度，就放到末尾
+      let insertAt = Math.min(ins.bIdx, oldList.length);
+      // ★ 但要考虑：d 插进来后，位置序号定义是"第 bIdx 位"
+      //   bIdx 是 b 里的下标（0-based），对应"第 bIdx+1 位"
+      //   插到 oldList 时，也插到下标 bIdx 位置
+      insertAt = Math.max(0, Math.min(insertAt, oldList.length));
 
-      newP.content = newContent + '\n' + mergedBlock;
-      merged++;
-      console.log('[热更新] ✅ 合并 COT suture 段:', nm, ' 变量数:', mergedNames.length);
-    });
-
-    result.prompts = newPrompts;
+      oldList.splice(insertAt, 0, {
+        identifier: newId,
+        name: src.name,
+        content: src.content,
+        enabled: src.enabled !== false,
+        raw: cloned,
+        _isNew: true,
+      });
+      console.log(`[热更新] 插入「${src.name}」到第 ${insertAt + 1} 位（b 里的序号 ${ins.bIdx + 1}）`);
+    }
 
     // ============================================================
-    // 写入
+    // ★ 把 oldList 写回预设结构
     // ============================================================
-    console.log(`[热更新] 应用：新增 ${added} · 合并COT ${merged} → 写回「${targetName}」`);
+    if (fmt === 'modern') {
+      const newPromptsArr = [];
+      const newOrderArr = [];
+      oldList.forEach(e => {
+        let p = e.raw;
+        if (e._isNew) {
+          p = JSON.parse(JSON.stringify(e.raw));
+        } else {
+          // ★ 同步 name / content / enabled 到 raw
+          p = JSON.parse(JSON.stringify(p));
+          p.name = e.name;
+          p.content = e.content;
+        }
+        if (!p.identifier) p.identifier = e.identifier;
+        newPromptsArr.push(p);
+        newOrderArr.push({ identifier: e.identifier, enabled: e.enabled !== false });
+      });
+      result.prompts = newPromptsArr;
+      if (Array.isArray(result.prompt_order) && result.prompt_order[0]) {
+        result.prompt_order[0].order = newOrderArr;
+      } else {
+        result.prompt_order = [{ character_id: 100001, order: newOrderArr }];
+      }
+    } else {
+      // legacy：直接按 oldList 顺序写 prompts，每条同步 name/content/enabled
+      const newPromptsArr = oldList.map(e => {
+        const p = JSON.parse(JSON.stringify(e._isNew ? e.raw : e.raw));
+        p.identifier = e.identifier;
+        p.id = e.identifier;
+        p.name = e.name;
+        p.content = e.content;
+        p.enabled = e.enabled !== false;
+        return p;
+      });
+      result.prompts = newPromptsArr;
+    }
 
-    createBackup(targetName, '热更新');   // ★ 写入前备份
+    // ============================================================
+    // ★ 写入
+    // ============================================================
+    console.log(`[热更新] 应用：新增 ${added} · 修改 ${merged} → 写回「${targetName}」`);
+
+    await createBackup(targetName, '热更新');
     const ok = await writePreset(targetName, result);
     if (ok) {
-      if (window.toastr) window.toastr.success(`✅ 热更新完成：新增 ${added} · 合并COT ${merged}`);
-      else alert(`✅ 热更新完成\n新增 ${added} · 合并COT ${merged}`);
+      if (window.toastr) window.toastr.success(`✅ 热更新完成：新增 ${added} · 修改 ${merged}`);
+      else alert(`✅ 热更新完成\n新增 ${added} · 修改 ${merged}`);
       try {
         const currentName = getCurrentPresetName();
         if (currentName === targetName && typeof window.loadPreset === 'function') {
@@ -1419,106 +1929,245 @@ ${blocks}
   // ============================================================
   // [BACKUP] 预设备份 / 回档
   // ============================================================
-  const BACKUP_KEY = 'wi_preset_suture_backups';
-  const BACKUP_MAX_PER_PRESET = 10;   // 每个预设最多保留几个快照
+  const BACKUP_KEY = 'wi_preset_suture_backups';   // 老 localStorage key（迁移用）
+  const BACKUP_MAX_PER_PRESET = 3;                 // 每个预设最多保留几个快照
 
-  function loadAllBackups() {
+  // ============================================================
+  // [IDB] IndexedDB 封装（替代 localStorage 存备份）
+  // ============================================================
+  const IDB_NAME = 'wi_preset_suture_db';
+  const IDB_STORE = 'backups';
+  let __wiIdbPromise = null;
+
+  function openIdb() {
+    if (__wiIdbPromise) return __wiIdbPromise;
+    __wiIdbPromise = new Promise((resolve, reject) => {
+      let req;
+      try {
+        req = indexedDB.open(IDB_NAME, 1);
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          const store = db.createObjectStore(IDB_STORE, { keyPath: 'key' });
+          store.createIndex('presetName', 'presetName', { unique: false });
+          store.createIndex('ts', 'ts', { unique: false });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return __wiIdbPromise;
+  }
+
+  async function idbGetAll() {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function idbPut(record) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.put(record);
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function idbDelete(key) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.delete(key);
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function idbClear() {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.clear();
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  // ★ 迁移：把老 localStorage 里的备份搬进 IndexedDB（只跑一次）
+  async function migrateBackupsFromLocalStorage() {
     try {
       const raw = localStorage.getItem(BACKUP_KEY);
-      if (!raw) return {};
-      const d = JSON.parse(raw);
-      return (d && typeof d === 'object') ? d : {};
+      if (!raw) return;
+      const all = JSON.parse(raw);
+      if (!all || typeof all !== 'object') return;
+      let count = 0;
+      for (const presetName of Object.keys(all)) {
+        const list = Array.isArray(all[presetName]) ? all[presetName] : [];
+        for (const snap of list) {
+          if (!snap || !snap.id) continue;
+          await idbPut({
+            key: presetName + '||' + snap.id,
+            presetName,
+            id: snap.id,
+            ts: snap.ts || Date.now(),
+            action: snap.action || '手动',
+            size: snap.size || 0,
+            data: snap.data,
+          });
+          count++;
+        }
+      }
+      // 搬完清空 localStorage（释放空间）
+      localStorage.removeItem(BACKUP_KEY);
+      if (count > 0) {
+        console.log('[预设缝合][备份] ✅ 已从 localStorage 迁移 ' + count + ' 份快照到 IndexedDB');
+      }
+    } catch (e) {
+      console.warn('[预设缝合][备份] 迁移失败（忽略，不影响新功能）:', e);
+    }
+  }
+
+  // 启动时迁移一次
+  migrateBackupsFromLocalStorage();
+
+  // ★ 读取全部备份（按 presetName 分组返回）
+  async function loadAllBackups() {
+    try {
+      const all = await idbGetAll();
+      const grouped = {};
+      all.forEach(r => {
+        if (!r || !r.presetName) return;
+        if (!grouped[r.presetName]) grouped[r.presetName] = [];
+        grouped[r.presetName].push({
+          id: r.id,
+          ts: r.ts || 0,
+          action: r.action || '手动',
+          size: r.size || 0,
+          data: r.data,
+        });
+      });
+      // 每个预设按时间降序
+      for (const k of Object.keys(grouped)) {
+        grouped[k].sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      }
+      return grouped;
     } catch (e) {
       console.warn('[预设缝合][备份] 读取失败', e);
       return {};
     }
   }
 
-  function saveAllBackups(all) {
-    try {
-      localStorage.setItem(BACKUP_KEY, JSON.stringify(all));
-      return true;
-    } catch (e) {
-      console.error('[预设缝合][备份] 写入失败（可能超出 localStorage 配额）', e);
-      return false;
+  // ★ 备份瘦身：每个预设最多 BACKUP_MAX_PER_PRESET 份；全局最多 TOTAL_MAX 份
+  async function slimBackups() {
+    const TOTAL_MAX = 6;
+    const all = await idbGetAll();
+    if (all.length === 0) return;
+
+    // 1) 按预设分组，超额的砍老
+    const byPreset = {};
+    all.forEach(r => {
+      if (!byPreset[r.presetName]) byPreset[r.presetName] = [];
+      byPreset[r.presetName].push(r);
+    });
+    const toDelete = [];
+    for (const presetName of Object.keys(byPreset)) {
+      const list = byPreset[presetName];
+      list.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      if (list.length > BACKUP_MAX_PER_PRESET) {
+        list.slice(BACKUP_MAX_PER_PRESET).forEach(r => toDelete.push(r.key));
+      }
+    }
+
+    // 2) 全局总量限制
+    const remaining = all.filter(r => !toDelete.includes(r.key));
+    if (remaining.length > TOTAL_MAX) {
+      remaining.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      remaining.slice(TOTAL_MAX).forEach(r => toDelete.push(r.key));
+    }
+
+    for (const key of toDelete) {
+      try { await idbDelete(key); } catch (e) { }
     }
   }
 
-  // 给某个预设创建一份快照
-  // action: 触发原因，比如 '缝合'、'诊断'、'热更新'、'编辑'
-  function createBackup(presetName, action) {
+  // 给某个预设创建一份快照（异步，返回快照 id 或 null）
+  async function createBackup(presetName, action) {
     if (!presetName) return null;
     const preset = readPreset(presetName);
     if (!preset) {
       console.warn('[预设缝合][备份] 读不到预设，跳过备份:', presetName);
       return null;
     }
-    const all = loadAllBackups();
-    if (!Array.isArray(all[presetName])) all[presetName] = [];
 
     const snapshot = {
-      id: uuid(),
+      key: presetName + '||' + uuid(),
+      presetName,
+      id: null,   // 下面填
       ts: Date.now(),
       action: action || '手动',
       size: JSON.stringify(preset).length,
       data: preset,
     };
+    snapshot.id = snapshot.key.split('||')[1];
 
-    // 最新的放最前面
-    all[presetName].unshift(snapshot);
-
-    // 超过上限就砍掉最老的
-    if (all[presetName].length > BACKUP_MAX_PER_PRESET) {
-      all[presetName] = all[presetName].slice(0, BACKUP_MAX_PER_PRESET);
-    }
-
-    // 写入；如果配额爆了，逐条丢弃最老的再试
-    let ok = saveAllBackups(all);
-    let retry = 0;
-    while (!ok && retry < 20) {
-      retry++;
-      // 找到总条数最多的那个预设，砍掉最老的一条
-      let victim = null, maxLen = 0;
-      for (const k of Object.keys(all)) {
-        if (all[k].length > maxLen) { maxLen = all[k].length; victim = k; }
-      }
-      if (!victim || all[victim].length === 0) break;
-      all[victim].pop();
-      if (all[victim].length === 0) delete all[victim];
-      ok = saveAllBackups(all);
-    }
-    if (!ok) {
-      console.error('[预设缝合][备份] 配额不足，放弃备份');
+    try {
+      await idbPut(snapshot);
+      await slimBackups();
+      console.log('[预设缝合][备份] ✅ 已备份「' + presetName + '」（' + (action || '手动') + '，' + snapshot.size + ' 字节）');
+      return snapshot.id;
+    } catch (e) {
+      console.error('[预设缝合][备份] 写入失败', e);
       return null;
     }
-
-    console.log('[预设缝合][备份] ✅ 已备份「' + presetName + '」（' + (action || '手动') + '，' + snapshot.size + ' 字节）');
-    return snapshot.id;
   }
 
-  function listBackups(presetName) {
-    const all = loadAllBackups();
+  // ★ 列表（现在是异步）
+  async function listBackups(presetName) {
+    const all = await loadAllBackups();
     return Array.isArray(all[presetName]) ? all[presetName] : [];
   }
 
-  function deleteBackup(presetName, backupId) {
-    const all = loadAllBackups();
-    if (!Array.isArray(all[presetName])) return false;
-    all[presetName] = all[presetName].filter(b => b.id !== backupId);
-    if (all[presetName].length === 0) delete all[presetName];
-    return saveAllBackups(all);
+  async function deleteBackup(presetName, backupId) {
+    try {
+      await idbDelete(presetName + '||' + backupId);
+      return true;
+    } catch (e) {
+      console.error('[预设缝合][备份] 删除失败', e);
+      return false;
+    }
   }
 
-  function clearBackups(presetName) {
-    const all = loadAllBackups();
-    delete all[presetName];
-    return saveAllBackups(all);
+  async function clearBackups(presetName) {
+    const list = await listBackups(presetName);
+    for (const b of list) {
+      try { await idbDelete(presetName + '||' + b.id); } catch (e) { }
+    }
+    return true;
   }
 
-  function getBackupData(presetName, backupId) {
-    const list = listBackups(presetName);
-    const b = list.find(x => x.id === backupId);
-    return b ? b.data : null;
+  async function getBackupData(presetName, backupId) {
+    const db = await openIdb();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.get(presetName + '||' + backupId);
+      req.onsuccess = () => resolve(req.result?.data || null);
+      req.onerror = () => resolve(null);
+    });
   }
 
   function formatBackupTime(ts) {
@@ -1535,8 +2184,8 @@ ${blocks}
 
   // ★ 导出所有备份（或指定预设的备份）为文件
   // presetNames: null = 全部；数组 = 只导这几个
-  function exportBackupsToFile(presetNames) {
-    const all = loadAllBackups();
+  async function exportBackupsToFile(presetNames) {
+    const all = await loadAllBackups();
     const out = {
       wi_preset_suture_backups: true,
       exportedAt: Date.now(),
@@ -1585,7 +2234,7 @@ ${blocks}
       document.body.removeChild(input);
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         let parsed;
         try {
           parsed = JSON.parse(String(reader.result || ''));
@@ -1613,35 +2262,40 @@ ${blocks}
         );
         if (!mode) return;
 
-        const all = loadAllBackups();
-        let merged = 0, skipped = 0;
-        incomingPresets.forEach(name => {
-          const list = Array.isArray(parsed.presets[name]) ? parsed.presets[name] : [];
-          if (!Array.isArray(all[name])) all[name] = [];
-          const existingIds = new Set(all[name].map(b => b && b.id).filter(Boolean));
-          list.forEach(snap => {
-            if (!snap || !snap.id) { skipped++; return; }
-            if (existingIds.has(snap.id)) { skipped++; return; }
-            // 过滤缺 data 的损坏快照
-            if (!snap.data || typeof snap.data !== 'object') { skipped++; return; }
-            all[name].push(snap);
-            existingIds.add(snap.id);
-            merged++;
-          });
-          // 每个预设仍然遵守上限
-          all[name].sort((a, b) => (b.ts || 0) - (a.ts || 0));
-          if (all[name].length > BACKUP_MAX_PER_PRESET) {
-            all[name] = all[name].slice(0, BACKUP_MAX_PER_PRESET);
-          }
-        });
-
-        // 写入，如果配额爆了提示
-        const ok = saveAllBackups(all);
-        if (!ok) {
-          alert('❌ 导入后写入失败（localStorage 配额不足）\n\n' +
-            '建议：先清理一些旧备份，或者删掉一些不重要的预设快照后再试。');
-          return;
+        // 拉取现有的（判断重复）
+        const existing = await loadAllBackups();
+        const existingIdsByPreset = {};
+        for (const name of Object.keys(existing)) {
+          existingIdsByPreset[name] = new Set(existing[name].map(b => b && b.id).filter(Boolean));
         }
+
+        let merged = 0, skipped = 0;
+        for (const name of incomingPresets) {
+          const list = Array.isArray(parsed.presets[name]) ? parsed.presets[name] : [];
+          if (!existingIdsByPreset[name]) existingIdsByPreset[name] = new Set();
+          for (const snap of list) {
+            if (!snap || !snap.id) { skipped++; continue; }
+            if (existingIdsByPreset[name].has(snap.id)) { skipped++; continue; }
+            if (!snap.data || typeof snap.data !== 'object') { skipped++; continue; }
+            try {
+              await idbPut({
+                key: name + '||' + snap.id,
+                presetName: name,
+                id: snap.id,
+                ts: snap.ts || Date.now(),
+                action: snap.action || '导入',
+                size: snap.size || JSON.stringify(snap.data).length,
+                data: snap.data,
+              });
+              existingIdsByPreset[name].add(snap.id);
+              merged++;
+            } catch (e) {
+              console.warn('[预设缝合][备份] 导入失败', e);
+              skipped++;
+            }
+          }
+        }
+        await slimBackups();
 
         if (window.toastr) {
           window.toastr.success(`✅ 已导入 ${merged} 份快照${skipped > 0 ? '（跳过 ' + skipped + ' 份重复/损坏）' : ''}`);
@@ -2008,6 +2662,8 @@ ${blocks}
     }
     #wi_preset_suture_panel,
     .wi-ps-mobile-box,
+    #wi_preset_suture_panel,
+    .wi-ps-mobile-box,
     #wi_ps_modal_mask,
     #wi_ps_diag_mask,
     #wi_ps_diag_result_mask,
@@ -2017,6 +2673,7 @@ ${blocks}
     #wi_ps_cot_rewrite_mask,
     #wi_ps_batch_continue_mask,
     #wi_ps_batch_error_mask,
+    #wi_ps_migrate_mask,
     #wi_ps_loading_mask {
       ${WI_THEMES[themeName]}
       --wi-theme-name: "${themeName}";
@@ -2102,6 +2759,7 @@ ${blocks}
     #wi_ps_cot_rewrite_mask,
     #wi_ps_batch_continue_mask,
     #wi_ps_batch_error_mask,
+    #wi_ps_migrate_mask,
     #wi_ps_loading_mask {
       position: absolute !important;
       inset: 0 !important;
@@ -2139,6 +2797,15 @@ ${blocks}
         -webkit-overflow-scrolling: touch !important;
         flex-wrap: nowrap !important;
         cursor: default !important;
+      }
+      /* ★ TauriTavern 专用：顶部避让状态栏（硬编码 50px，带 !important 覆盖行内样式） */
+      #wi_preset_suture_panel.tt-env {
+        padding-top: 50px !important;
+        box-sizing: border-box !important;
+      }
+      #wi_preset_suture_panel.tt-env #wi_ps_tab_bar {
+        /* tab 栏顶部也加一点（防止它贴住 panel 内边距的边界） */
+        padding-top: 4px !important;
       }
       #wi_ps_tab_bar > span:first-child {
         display: none !important;
@@ -2387,6 +3054,20 @@ ${blocks}
 
     </div>`);
     $('body').append($panel);
+
+    // ★ TauriTavern：给面板加类，触发顶部避让
+    if (isTauriTavernEnv()) {
+      const panelEl = __wiRootDoc.getElementById(PANEL_ID);
+      if (panelEl) {
+        panelEl.classList.add('tt-env');
+        console.log('[psycho缝合] 检测到 TauriTavern，已启用顶部避让');
+        // 调试：打印注入的 inset 值
+        try {
+          const v = getComputedStyle(document.documentElement).getPropertyValue('--tt-inset-top');
+          console.log('[psycho缝合] --tt-inset-top =', JSON.stringify(v));
+        } catch (e) { }
+      }
+    }
 
     $('.wi-ps-tab').on('click', function () {
       const tab = $(this).data('tab');
@@ -3153,7 +3834,7 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
     }
 
     showLoadingMask('💾 正在写入…', `修改 ${modified} 条 · 新增 ${added} 条`);
-    createBackup(targetName, '诊断');   // ★ 写入前备份
+    await createBackup(targetName, '诊断');   // ★ 写入前备份
     let ok = false;
     try {
       ok = await writePreset(targetName, newPreset);
@@ -3661,7 +4342,7 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
       if (!target) { alert('找不到条目'); return; }
       target.name = newName;
       target.content = newContent;
-      createBackup(state.activePreset, '编辑');   // ★ 写入前备份
+      await createBackup(state.activePreset, '编辑');   // ★ 写入前备份
       const ok = await writePreset(state.activePreset, state.presetData);
       if (ok) {
         if (window.toastr) window.toastr.success('已保存');
@@ -3674,7 +4355,7 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
     $('#wi_ps_edit_enable').on('click', async () => {
       const cur = getPromptEnabled(state.presetData, p.identifier);
       setPromptEnabled(state.presetData, p.identifier, !cur);
-      createBackup(state.activePreset, '启停切换');   // ★ 写入前备份
+      await createBackup(state.activePreset, '启停切换');   // ★ 写入前备份
       const ok = await writePreset(state.activePreset, state.presetData);
       if (ok) {
         if (window.toastr) window.toastr.success(cur ? '已禁用' : '已启用');
@@ -3989,12 +4670,12 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
     renderBackupUI();
   }
 
-  function renderBackupUI() {
+  async function renderBackupUI() {
     const $container = $('#wi_ps_backup_content');
     if (!$container.length) return;
 
     const presetNames = getAllPresetNames();
-    const all = loadAllBackups();
+    const all = await loadAllBackups();
 
     // 整理一份"有备份的预设"列表
     const rows = [];
@@ -4010,9 +4691,10 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
     });
 
     const totalCount = rows.reduce((s, r) => s + r.count, 0);
-    const totalBytes = (function () {
-      try { return (localStorage.getItem(BACKUP_KEY) || '').length; } catch (e) { return 0; }
-    })();
+    // ★ IndexedDB 不支持直接算总量，用记录 size 之和估算
+    const totalBytes = Object.values(all).reduce((sum, list) => {
+      return sum + list.reduce((s, b) => s + (b.size || 0), 0);
+    }, 0);
 
     let html = `
       <div style="font-size:15px;font-weight:700;color:var(--wi-accent);margin-bottom:12px">💾 预设备份 / 回档</div>
@@ -4020,9 +4702,11 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
       <div style="background:var(--wi-bg-1);border:1px solid var(--wi-border);border-radius:6px;padding:10px;margin-bottom:14px;font-size:11px;color:var(--wi-text);line-height:1.7">
         <b style="color:var(--wi-ok)">机制：</b>每次缝合 / 诊断 / 热更新 / 编辑写回前，自动给该预设存一份完整快照。<br>
         · 每个预设最多保留 <b>${BACKUP_MAX_PER_PRESET}</b> 份<br>
+        · 全局最多保留 <b>6</b> 份（优先保最新）<br>
         · 超出上限时自动丢最老的<br>
         · 目前共 <b>${totalCount}</b> 份快照，约占 <b>${formatSize(totalBytes)}</b><br>
-        · <span style="color:var(--wi-warn)">备份存在浏览器 localStorage，换设备/清缓存会丢。</span>
+        · <span style="color:var(--wi-warn)">备份存在浏览器 IndexedDB（存储空间充足），换设备/清缓存会丢。</span><br>
+        · <span style="color:var(--wi-ok)">💾 建议定期「导出全部备份」保存到本地。</span>
       </div>
 
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
@@ -4069,7 +4753,7 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
     bindBackupEvents($container);
 
     // 展开逻辑
-    $container.find('.wi-bk-preset-head').on('click', function () {
+    $container.find('.wi-bk-preset-head').on('click', async function () {
       const name = $(this).attr('data-name');
       const $body = $container.find(`.wi-bk-preset-body[data-name="${CSS.escape(name)}"]`);
       const $arrow = $(this).find('.wi-bk-arrow');
@@ -4079,7 +4763,7 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
         return;
       }
       // 渲染快照列表
-      const list = listBackups(name);
+      const list = await listBackups(name);
       if (list.length === 0) {
         $body.html('<div style="font-size:11px;color:var(--wi-text-dim);padding:10px">该预设暂无快照</div>');
       } else {
@@ -4110,10 +4794,10 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
 
   function bindBackupEvents($container) {
     // 手动备份当前预设
-    $container.find('#wi_bk_manual').on('click', () => {
+    $container.find('#wi_bk_manual').on('click', async () => {
       const current = getCurrentPresetName();
       if (!current) { alert('当前没有加载中的预设'); return; }
-      const id = createBackup(current, '手动');
+      const id = await createBackup(current, '手动');
       if (id) {
         if (window.toastr) window.toastr.success('已手动备份：' + current);
         renderBackupUI();
@@ -4133,14 +4817,15 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
     });
 
     // 清理孤儿备份
-    $container.find('#wi_bk_cleanup').on('click', () => {
+    $container.find('#wi_bk_cleanup').on('click', async () => {
       const presetNames = getAllPresetNames();
-      const all = loadAllBackups();
+      const all = await loadAllBackups();
       const orphans = Object.keys(all).filter(n => !presetNames.includes(n));
       if (orphans.length === 0) { alert('没有孤儿备份'); return; }
       if (!confirm(`发现 ${orphans.length} 个"当前读不到的预设"的备份：\n\n${orphans.join('\n')}\n\n要清理掉吗？`)) return;
-      orphans.forEach(n => delete all[n]);
-      saveAllBackups(all);
+      for (const n of orphans) {
+        await clearBackups(n);
+      }
       if (window.toastr) window.toastr.success('已清理 ' + orphans.length + ' 个孤儿备份');
       renderBackupUI();
     });
@@ -4150,13 +4835,13 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
       e.stopPropagation();
       const name = $(this).attr('data-name');
       const id = $(this).attr('data-id');
-      const data = getBackupData(name, id);
-      if (!data) { alert('快照数据不存在'); return; }
+      const data = await getBackupData(name, id);
+      if (!data) { alert('快照数据已丢失，无法撤销'); return; }
       if (!confirm(`确定用这份快照回档「${name}」？\n\n当前版本会被覆盖（回档前会自动再存一份当前状态作为保险）。`)) return;
 
       // 回档前把"当前状态"再备一份，防止误回档
       if (getAllPresetNames().includes(name)) {
-        createBackup(name, '回档前快照');
+        await createBackup(name, '回档前快照');
       }
 
       const ok = await writePreset(name, JSON.parse(JSON.stringify(data)));
@@ -4183,12 +4868,12 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
     });
 
     // 删除单份
-    $container.on('click', '.wi-bk-delete', function (e) {
+    $container.on('click', '.wi-bk-delete', async function (e) {
       e.stopPropagation();
       const name = $(this).attr('data-name');
       const id = $(this).attr('data-id');
       if (!confirm('删除这份快照？')) return;
-      deleteBackup(name, id);
+      await deleteBackup(name, id);
       renderBackupUI();
     });
   }
@@ -5131,6 +5816,7 @@ ${zoneList}
         sourceIndex: i + 1,
         sourceName: e.name || '(未命名)',
         sourceContent: String(e.content || ''),
+        _sutureFrom: '粘贴',   // ★ 粘贴缝合的来源标记
         zone: zoneObj ? zoneObj.name : zoneName,
         zoneObj: zoneObj,
         insertAfter: e.insertAfter || '__LAST__',
@@ -5221,12 +5907,29 @@ ${zoneList}
   // [IMPORT JSON] 导入 JSON 预设当源
   // ============================================================
   function importSourcePresetFromJson() {
-    const $input = $('<input type="file" accept=".json,application/json">');
-    $input.on('change', function () {
-      const file = this.files && this.files[0];
-      if (!file) return;
+    // ★ 把 input 挂到 body 上（某些环境对 detached input 创建的 FileReader 会报错）
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+
+    input.onchange = () => {
+      const file = input.files && input.files[0];
+      // 先保留 input 在 DOM，等 FileReader 读完再移除
+      if (!file) {
+        try { document.body.removeChild(input); } catch (e) { }
+        return;
+      }
+
       const reader = new FileReader();
+
+      const cleanup = () => {
+        try { document.body.removeChild(input); } catch (e) { }
+      };
+
       reader.onload = (e) => {
+        cleanup();
         const text = String(e.target.result || '');
         let parsed;
         try {
@@ -5235,18 +5938,86 @@ ${zoneList}
           alert('❌ JSON 解析失败：' + (err.message || err));
           return;
         }
-        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.prompts)) {
-          alert('❌ 不是有效的预设 JSON（缺少 prompts 数组）');
+        if (!parsed || typeof parsed !== 'object') {
+          alert('❌ JSON 顶层不是对象');
           return;
         }
-        handleImportedPreset(parsed, file.name);
+
+        // ★ 判断格式：预设 vs 世界书
+        if (Array.isArray(parsed.prompts)) {
+          handleImportedPreset(parsed, file.name);
+        } else if (parsed.entries && typeof parsed.entries === 'object') {
+          const converted = convertWorldbookJsonToPreset(parsed, file.name);
+          if (!converted) {
+            alert('❌ 世界书 JSON 解析失败（没读到任何条目）');
+            return;
+          }
+          handleImportedPreset(converted, file.name + '（世界书）');
+        } else {
+          alert('❌ 无法识别的 JSON 格式\n\n既不是预设（没有 prompts 数组），也不是世界书（没有 entries 对象）');
+        }
       };
+
       reader.onerror = () => {
+        cleanup();
         alert('❌ 读取文件失败');
       };
+
       reader.readAsText(file);
+    };
+
+    input.click();
+  }
+
+  // ★ 把世界书 JSON 转成预设结构，复用后续流程
+  // 世界书 JSON 格式：
+  //   { "entries": { "0": { "uid": 0, "key": [...], "keysecondary": [...],
+  //                        "comment": "条目名", "content": "内容", "disable": false, ... }, ... } }
+  // 预设结构：
+  //   { "prompts": [ { identifier, name, content, enabled, role }, ... ] }
+  function convertWorldbookJsonToPreset(wbJson, fileName) {
+    const entries = wbJson.entries;
+    if (!entries || typeof entries !== 'object') return null;
+
+    // 世界书的 entries 是对象（键是序号），转成数组
+    // 按 uid / 键数字 排序
+    const entryList = Object.values(entries).filter(e => e && typeof e === 'object');
+
+    if (entryList.length === 0) return null;
+
+    // 按 uid 排序（如果没有 uid，按原始键顺序）
+    entryList.sort((a, b) => {
+      const ua = a.uid !== undefined ? Number(a.uid) : 0;
+      const ub = b.uid !== undefined ? Number(b.uid) : 0;
+      return ua - ub;
     });
-    $input.trigger('click');
+
+    const prompts = entryList.map((e, i) => {
+      const uid = e.uid !== undefined ? e.uid : i;
+      const name = String(e.comment || e.name || ('条目 ' + uid));
+      const content = String(e.content || '');
+      // 世界书条目：多种禁用字段写法兼容
+      let enabled = true;
+      if (e.disable === true) enabled = false;
+      else if (e.enabled === false) enabled = false;
+      else if (e.enabled === true) enabled = true;
+      return {
+        identifier: 'wb_' + uid,
+        id: 'wb_' + uid,
+        name,
+        content,
+        role: 'system',
+        enabled,
+      };
+    });
+
+    return {
+      prompts,
+      // 保留原始世界书信息（备用）
+      _wbRaw: wbJson,
+      _wbName: fileName || '(导入的世界书)',
+      _isWorldbook: true,
+    };
   }
 
   function handleImportedPreset(preset, fileName) {
@@ -5560,6 +6331,7 @@ ${zoneList}
     $mask.append($box);
     $('#' + PANEL_ID).append($mask);
 
+    // （调试已删）
     const $status = $box.find('#wi_ps_tut_status');
     const $text = $box.find('#wi_ps_tut_text');
 
@@ -6116,6 +6888,7 @@ ${zoneList}
         sourceIndex: i + 1,
         sourceName: srcEntry.name,
         sourceContent: finalContent,   // ★ 用最终内容
+        _sutureFrom: ap.sourcePresetName || '教程缝合',   // ★ 教程缝合的来源标记
         zone: zoneObj.name,
         zoneObj: zoneObj,
         insertAfter: insertAfterFinal,
@@ -6597,11 +7370,11 @@ ${zoneList}
       };
     });
 
-    // ★ 强制给条目名加来源（不再靠开关）
+    // ★ 名字保持干净，来源信息存到 plan 的 _sutureFrom 字段
     if (state.sutureSource) {
       normalized.forEach(r => {
-        if (r.entryName && !r.entryName.includes('[来自')) {
-          r.entryName = `${r.entryName} [来自${state.sutureSource}]`;
+        if (!r._sutureFrom) {
+          r._sutureFrom = state.sutureSource;
         }
       });
     }
@@ -7361,6 +8134,7 @@ ${zoneList}
       cloned.id = newId;   // ★ 无论如何都设 id，跟 identifier 保持一致
       cloned.name = plan.entryName;
       if (cloned.enabled === undefined) cloned.enabled = true;
+      // ★ 缝合来源不塞条目里（酒馆会丢自定义字段），改存 extensions
 
       let content = cloned.content || '';
       const originalSetVars = parseSetVars(content).filter(isAssignmentSetVar);
@@ -7883,6 +8657,18 @@ ${zoneList}
       allNames: z.allNames || [],
     }));
 
+    // ★ 记录缝合来源：entry identifier -> 来源
+    if (!tgtPreset.extensions.wi_preset_suture_origins) {
+      tgtPreset.extensions.wi_preset_suture_origins = {};
+    }
+    for (const ins of insertions) {
+      const from = ins.plan._sutureFrom;
+      if (from) {
+        tgtPreset.extensions.wi_preset_suture_origins[ins.newId] = from;
+      }
+    }
+    console.log('[缝合器][写入] 记录缝合来源:', tgtPreset.extensions.wi_preset_suture_origins);
+
     console.log('[缝合器][写入] ===== 第六步：写回预设 =====');
     console.log('[缝合器][写入] tgtPreset.prompts 数量 =', tgtPreset.prompts?.length);
     console.log('[缝合器][写入] 检查新条目是否在 tgtPreset.prompts 里:');
@@ -7906,7 +8692,7 @@ ${zoneList}
       console.log('[缝合器][写入] 获取变量区 content 末尾 300 字:\n', varInitEntryFinal.content?.slice(-300));
     }
 
-    const backupId = createBackup(state.sutureTarget, '缝合');   // ★ 写入前备份
+    const backupId = await createBackup(state.sutureTarget, '缝合');   // ★ 写入前备份
     const ok = await writePreset(state.sutureTarget, tgtPreset);
     console.log('[缝合器][写入] writePreset 结果 =', ok, ' 备份 id =', backupId);
 
@@ -7978,8 +8764,9 @@ ${zoneList}
     const canUndo = !!backupId;
 
     const $mask = $('<div id="' + MASK_ID + '">').css({
-      position: 'fixed', inset: 0, background: 'var(--wi-mask)', zIndex: 1000045,
+      position: 'absolute', inset: 0, background: 'var(--wi-mask)', zIndex: 1000045,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: '8px', boxSizing: 'border-box', overflowY: 'auto',
     });
     const $box = $('<div>').addClass('wi-ps-mobile-box').css({
       background: 'var(--wi-box-bg)', border: '1px solid var(--wi-border)', borderRadius: '10px',
