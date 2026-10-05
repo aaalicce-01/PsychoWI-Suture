@@ -3,7 +3,7 @@
   // [HEADER] 实例管理 / 版本检测
   // ============================================================
   const WI_INSTANCE_ID = 'psychowi-preset-suture';
-  const WI_VERSION = '1.0.1';
+  const WI_VERSION = '1.0.2';
   const __wiInstanceInfo = { id: WI_INSTANCE_ID, version: WI_VERSION, ts: Date.now(), kill: null };
 
   // （自动更新检测已移除：改用动态 import + 时间戳，每次刷新自动拉最新）
@@ -1082,6 +1082,7 @@ ${blocks}
 
     <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-bottom:14px">
       <button id="wi_hu_migrate_old" style="${BTN_AI_CSS}padding:8px 16px;font-size:12px">🔧 迁移老缝合痕迹</button>
+      <button id="wi_hu_migrate_new" style="${BTN_AI_CSS}padding:8px 16px;font-size:12px">🔧 迁移新缝合痕迹</button>
       <button id="wi_hu_compare" style="${BTN_PRIMARY_CSS}padding:8px 24px;font-size:13px" disabled>🔍 对比</button>
     </div>
 
@@ -1175,6 +1176,41 @@ ${blocks}
 
       // 弹窗让用户确认
       showMigrateConfirmDialog(name, preset, targets);
+    });
+
+    // ★ 迁移新缝合痕迹：extensions → 名字 [来自...]
+    $container.find('#wi_hu_migrate_new').on('click', () => {
+      const name = $container.find('#wi_hu_old_preset').val();
+      if (!name) { alert('未选预设'); return; }
+      const preset = readPreset(name);
+      if (!preset) { alert('读取失败'); return; }
+
+      const origins = preset?.extensions?.wi_preset_suture_origins || {};
+      const raw = Array.isArray(preset.prompts) ? preset.prompts : [];
+      const targets = [];
+      raw.forEach((p, idx) => {
+        if (!p || typeof p !== 'object') return;
+        const id = p.identifier || p.id || '';
+        if (!id) return;
+        const from = origins[id];
+        if (!from) return;   // 没有 extensions 记录 → 不是新缝合
+        const nm = (p.name || '').trim();
+        if (/\[来自.+?\]\s*$/.test(nm)) return;   // 名字已有后缀 → 跳过
+        targets.push({
+          idx,
+          id,
+          oldName: nm,
+          newName: nm + ' [来自' + from + ']',
+          from,
+        });
+      });
+
+      if (targets.length === 0) {
+        alert('✅ 没发现"来源只存在 extensions 里"的新缝合条目，无需迁移。');
+        return;
+      }
+
+      showMigrateNewConfirmDialog(name, preset, targets);
     });
 
     $container.find('#wi_hu_compare').on('click', () => {
@@ -1380,10 +1416,10 @@ ${blocks}
 
       // 四行分类
       const cats = [
-        { key: 'added',    label: '🟢 新增', color: 'var(--wi-ok)' },
+        { key: 'added', label: '🟢 新增', color: 'var(--wi-ok)' },
         { key: 'modified', label: '🟡 修改', color: 'var(--wi-warn)' },
-        { key: 'deleted',  label: '🔴 删除', color: 'var(--wi-err)' },
-        { key: 'suture',   label: '🩹 缝合', color: 'var(--wi-accent-2)' },
+        { key: 'deleted', label: '🔴 删除', color: 'var(--wi-err)' },
+        { key: 'suture', label: '🩹 缝合', color: 'var(--wi-accent-2)' },
       ];
 
       cats.forEach(c => {
@@ -1531,17 +1567,129 @@ ${blocks}
   }
 
   // ============================================================
+  // [MIGRATE NEW] 迁移新缝合痕迹：extensions 记录 → 名字 [来自...] 后缀
+  // ============================================================
+  function showMigrateNewConfirmDialog(presetName, preset, targets) {
+    const MASK_ID = 'wi_ps_migrate_new_mask';
+    __wiRootDoc.querySelectorAll('#' + MASK_ID).forEach(el => el.remove());
+
+    const $mask = $('<div id="' + MASK_ID + '">').css({
+      position: 'absolute', inset: 0, background: 'var(--wi-mask-strong)', zIndex: 1000050,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: '8px', boxSizing: 'border-box', overflowY: 'auto',
+    });
+    const $box = $('<div>').addClass('wi-ps-mobile-box').css({
+      background: 'var(--wi-box-bg)', border: '1px solid var(--wi-border)', borderRadius: '10px',
+      padding: '18px', width: '720px', maxWidth: '95vw', maxHeight: '92vh',
+      overflow: 'auto', color: 'var(--wi-text)', boxShadow: 'var(--SmartThemeShadowColor, 0 12px 40px rgba(0,0,0,.7))',
+    });
+
+    let html = `
+      <div style="font-size:16px;font-weight:700;color:var(--wi-accent-2);margin-bottom:6px">🔧 迁移新缝合痕迹</div>
+      <div style="font-size:11px;color:var(--wi-text-dim);margin-bottom:14px;line-height:1.7">
+        预设：<b style="color:var(--wi-accent)">${escapeHtml(presetName)}</b>
+      </div>
+
+      <div style="background:var(--wi-bg-1);border:1px solid var(--wi-border);border-radius:6px;padding:10px;margin-bottom:12px;font-size:11px;color:var(--wi-text);line-height:1.7">
+        发现 <b style="color:var(--wi-warn)">${targets.length}</b> 条"来源只存在 extensions 里"的新缝合条目。<br>
+        迁移会：<br>
+        · 把名字后缀<b>加回来</b>（名字变 <code class="wi-code-warn">xxx [来自yyy]</code>）<br>
+        · extensions 记录<b>保留不动</b>（两处都有也不影响识别）<br>
+        · 迁移后仍能被热更新识别为"🩹 缝合"类
+      </div>
+
+      <div style="background:var(--wi-bg-0);border:1px solid var(--wi-border-soft);border-radius:6px;padding:8px;margin-bottom:14px;max-height:280px;overflow-y:auto;font-size:11px;line-height:1.7">
+        ${targets.map((t, i) => `
+          <div style="padding:6px 8px;border-bottom:1px dashed var(--wi-border-soft)">
+            <div>#${i + 1} <span style="color:var(--wi-text)">${escapeHtml(t.oldName)}</span></div>
+            <div style="color:var(--wi-ok);margin-left:12px">→ ${escapeHtml(t.newName)}</div>
+            <div style="color:var(--wi-text-dim);margin-left:12px;font-size:10px">来源：${escapeHtml(t.from)}（来自 extensions 记录）</div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div style="font-size:11px;color:var(--wi-text-dim);margin-bottom:12px;line-height:1.6">
+        ⚠️ 迁移会<b>立即写回预设</b>。写入前会自动备份一份。<br>
+        <span style="color:var(--wi-warn)">💡 提示：迁移是双向的，来回点会来回改名字。</span>
+      </div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+        <button id="wi_ps_mign_cancel" style="${BTN_CSS}">取消</button>
+        <button id="wi_ps_mign_run" style="${BTN_PRIMARY_CSS}padding:8px 24px;font-size:13px">✅ 确认迁移（${targets.length} 条）</button>
+      </div>
+    `;
+
+    $box.html(html);
+    $mask.append($box);
+    $('#' + PANEL_ID).append($mask);
+
+    $box.find('#wi_ps_mign_cancel').on('click', () => $mask.remove());
+
+    $box.find('#wi_ps_mign_run').on('click', async () => {
+      $mask.remove();
+      await doMigrateNewSuture(presetName, preset, targets);
+    });
+  }
+
+  async function doMigrateNewSuture(presetName, preset, targets) {
+    const newPreset = JSON.parse(JSON.stringify(preset));
+
+    let count = 0;
+    const raw = Array.isArray(newPreset.prompts) ? newPreset.prompts : [];
+    targets.forEach(t => {
+      const p = raw[t.idx];
+      if (!p) return;
+      const id = p.identifier || p.id || '';
+      if (!id) return;
+      // 双保险：再确认一次 extensions 里有记录、名字里没后缀
+      const from = newPreset.extensions?.wi_preset_suture_origins?.[id];
+      if (!from) return;
+      const nm = (p.name || '').trim();
+      if (/\[来自.+?\]\s*$/.test(nm)) return;
+      p.name = nm + ' [来自' + from + ']';
+      count++;
+    });
+
+    showLoadingMask('🔧 正在迁移新缝合痕迹…', `共 ${count} 条`);
+    await createBackup(presetName, '迁移新缝合');
+    let ok = false;
+    try {
+      ok = await writePreset(presetName, newPreset);
+    } finally {
+      hideLoadingMask();
+    }
+
+    if (ok) {
+      if (window.toastr) window.toastr.success(`✅ 已迁移 ${count} 条新缝合痕迹`);
+      else alert(`✅ 已迁移 ${count} 条`);
+
+      // 重载
+      try {
+        const cur = getCurrentPresetName();
+        if (cur === presetName && typeof window.loadPreset === 'function') {
+          window.loadPreset(cur);
+        }
+      } catch (e) { }
+
+      // 刷新热更新界面
+      renderHotUpdateUI();
+    } else {
+      alert('❌ 写入失败，看 F12');
+    }
+  }
+
+  // ============================================================
   // [MIGRATE OLD] 迁移老缝合痕迹：[来自...] 后缀 → extensions 记录
   // ============================================================
   function showMigrateConfirmDialog(presetName, preset, targets) {
     const MASK_ID = 'wi_ps_migrate_mask';
     __wiRootDoc.querySelectorAll('#' + MASK_ID).forEach(el => el.remove());
 
-const $mask = $('<div id="' + MASK_ID + '">').css({
-  position: 'absolute', inset: 0, background: 'var(--wi-mask-strong)', zIndex: 1000050,
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
-  padding: '8px', boxSizing: 'border-box', overflowY: 'auto',
-});
+    const $mask = $('<div id="' + MASK_ID + '">').css({
+      position: 'absolute', inset: 0, background: 'var(--wi-mask-strong)', zIndex: 1000050,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: '8px', boxSizing: 'border-box', overflowY: 'auto',
+    });
     const $box = $('<div>').addClass('wi-ps-mobile-box').css({
       background: 'var(--wi-box-bg)', border: '1px solid var(--wi-border)', borderRadius: '10px',
       padding: '18px', width: '720px', maxWidth: '95vw', maxHeight: '92vh',
@@ -2494,6 +2642,7 @@ const $mask = $('<div id="' + MASK_ID + '">').css({
     suturePick: {},
     sutureLearnCot: false,
     sutureKeepOrder: false,
+    sutureNameSuffix: false,   // ★ 缝合时是否给条目名加 [来自xxx] 后缀
     sutureSourceGroups: [],
     sutureMarkSource: false,
     sutureSearch: '',
@@ -5087,7 +5236,48 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
 
       $('#wi_ps_ai_save').on('click', () => {
         const cfg = readForm();
-        saveAiConfig(cfg);
+
+        // ★ 诊断：逐步验证
+        let diag = '【保存诊断】\n';
+        diag += '读取到的表单值：\n';
+        diag += '  url = ' + JSON.stringify(cfg.url) + '\n';
+        diag += '  key = ' + JSON.stringify(cfg.key) + '\n';
+        diag += '  model = ' + JSON.stringify(cfg.model) + '\n\n';
+
+        // 1. 调 saveAiConfig
+        try {
+          saveAiConfig(cfg);
+          diag += '① saveAiConfig 调用：✅ 没抛异常\n';
+        } catch (e) {
+          diag += '① saveAiConfig 调用：❌ ' + e.name + ' - ' + e.message + '\n';
+        }
+
+        // 2. 立刻从 localStorage 读回
+        try {
+          const raw = localStorage.getItem(AI_CONFIG_KEY);
+          diag += '② 写入后立刻读 localStorage：' + (raw ? '✅ ' + raw : '❌ null') + '\n';
+        } catch (e) {
+          diag += '② 写入后立刻读 localStorage：❌ ' + e.name + ' - ' + e.message + '\n';
+        }
+
+        // 3. 调 loadAiConfig 看它读回什么
+        try {
+          const loaded = loadAiConfig();
+          diag += '③ loadAiConfig() 读回：' + JSON.stringify(loaded) + '\n';
+        } catch (e) {
+          diag += '③ loadAiConfig() 读回：❌ ' + e.name + ' - ' + e.message + '\n';
+        }
+
+        // 4. isAiConfigReady 判定
+        try {
+          diag += '④ isAiConfigReady()：' + (isAiConfigReady(cfg) ? '✅ true' : '❌ false') + '\n';
+        } catch (e) {
+          diag += '④ isAiConfigReady()：❌ ' + e.name + ' - ' + e.message + '\n';
+        }
+
+        alert(diag);
+
+        // 原逻辑
         renderStatus('✅ 已保存', 'var(--wi-ok)');
         if (window.toastr) window.toastr.success('AI 配置已保存');
         if (state.sutureTargetStructure) renderStructurePanel(state.sutureTargetStructure);
@@ -5849,7 +6039,11 @@ ${zoneList}
             ${isCot ? '<span style="font-size:10px;color:var(--wi-accent);background:var(--wi-bg-2);padding:1px 5px;border-radius:3px">COT</span>' : ''}
             ${isSub ? '<span style="font-size:10px;color:var(--wi-warn);background:var(--wi-bg-2);padding:1px 5px;border-radius:3px">子规则 → ' + escapeHtml(r._cotParent) + '</span>' : ''}
             <span style="font-size:12px;color:var(--wi-text);font-weight:600">${escapeHtml(r.sourceName)}</span>
-            <span style="color:var(--wi-text-faint);font-size:10px">→ ${escapeHtml(r.entryName)}</span>
+            <span style="color:var(--wi-text-faint);font-size:10px">→ ${escapeHtml(
+              state.sutureNameSuffix && r._sutureFrom && !/\[来自.+?\]\s*$/.test(r.entryName)
+                ? r.entryName + ' [来自' + r._sutureFrom + ']'
+                : r.entryName
+            )}</span>
           </div>
           <div style="font-size:11px;color:var(--wi-text-dim);line-height:1.7;margin-bottom:6px">
             <b style="color:var(--wi-ok)">zone：</b>${escapeHtml(r.zone)}${zoneOk ? '' : ' <span style="color:var(--wi-err)">（⚠️ 不在 zone 列表）</span>'}
@@ -7077,6 +7271,12 @@ ${zoneList}
             <span style="display:block;font-size:10px;color:var(--wi-text-dim);margin-top:2px;margin-left:14px">└ 开：AI 读完整 COT，把 getvar 插到合适处｜关：直接追加末尾</span>
             </span>
           </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--wi-text);cursor:pointer">
+            <input type="checkbox" id="wi_ps_opt_name_suffix" ${state.sutureNameSuffix ? 'checked' : ''}>
+            <span>🏷️ 条目名加 [来自xxx] 后缀
+            <span style="display:block;font-size:10px;color:var(--wi-text-dim);margin-top:2px;margin-left:14px">└ 开：名字带来源，肉眼好认｜关：名字干净，来源只存 extensions</span>
+            </span>
+          </label>
         </div>
         <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
           <button id="wi_ps_suture_ai_plan" style="${BTN_AI_CSS}padding:8px 24px;font-size:13px">🤖 AI 缝合</button>
@@ -7128,6 +7328,9 @@ ${zoneList}
 
     $('#wi_ps_opt_learn_cot').on('change', function () {
       state.sutureLearnCot = $(this).is(':checked');
+    });
+    $('#wi_ps_opt_name_suffix').on('change', function () {
+      state.sutureNameSuffix = $(this).is(':checked');
     });
     updateSutureStatus();
   }
@@ -8132,7 +8335,12 @@ ${zoneList}
       //   原条目如果本来有 id，不要改它（但新条目没原 id，所以两个都设成 newId）
       cloned.identifier = newId;
       cloned.id = newId;   // ★ 无论如何都设 id，跟 identifier 保持一致
-      cloned.name = plan.entryName;
+      // ★ 按开关给名字加来源后缀（如果名字里已有 [来自...] 则不重复加）
+      let finalEntryName = plan.entryName;
+      if (state.sutureNameSuffix && plan._sutureFrom && !/\[来自.+?\]\s*$/.test(finalEntryName)) {
+        finalEntryName = finalEntryName + ' [来自' + plan._sutureFrom + ']';
+      }
+      cloned.name = finalEntryName;
       if (cloned.enabled === undefined) cloned.enabled = true;
       // ★ 缝合来源不塞条目里（酒馆会丢自定义字段），改存 extensions
 
