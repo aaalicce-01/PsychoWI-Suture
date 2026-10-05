@@ -3,7 +3,7 @@
   // [HEADER] 实例管理 / 版本检测
   // ============================================================
   const WI_INSTANCE_ID = 'psychowi-preset-suture';
-  const WI_VERSION = '1.0.3';
+  const WI_VERSION = '1.0.4';
   const __wiInstanceInfo = { id: WI_INSTANCE_ID, version: WI_VERSION, ts: Date.now(), kill: null };
 
   // （自动更新检测已移除：改用动态 import + 时间戳，每次刷新自动拉最新）
@@ -2939,13 +2939,27 @@ ${blocks}
         bottom: 0 !important;
         border-radius: 0 !important;
         border: none !important;
+        padding: 0 !important;
       }
       #wi_ps_tab_bar {
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
         overflow-x: auto !important;
         overflow-y: hidden !important;
         -webkit-overflow-scrolling: touch !important;
-        flex-wrap: nowrap !important;
         cursor: default !important;
+        white-space: nowrap !important;
+      }
+      #wi_ps_tab_bar > span:first-child {
+        display: inline-flex !important;
+        align-items: center !important;
+        flex-shrink: 0 !important;
+        white-space: nowrap !important;
+        writing-mode: horizontal-tb !important;
+        padding: 0 8px !important;
+        font-size: 11px !important;
       }
       /* ★ TauriTavern 专用：顶部避让状态栏（硬编码 50px，带 !important 覆盖行内样式） */
       #wi_preset_suture_panel.tt-env {
@@ -2956,9 +2970,7 @@ ${blocks}
         /* tab 栏顶部也加一点（防止它贴住 panel 内边距的边界） */
         padding-top: 4px !important;
       }
-      #wi_ps_tab_bar > span:first-child {
-        display: none !important;
-      }
+
       .wi-ps-tab {
         padding: 12px 14px !important;
         font-size: 13px !important;
@@ -3030,7 +3042,7 @@ ${blocks}
   // ============================================================
   function injectMagicWandEntries() {
     const ENTRIES = [
-      { id: 'wi_ps_magic_entry', text: 'psycho缝合', handler: togglePanel, icon: 'fa-solid fa-wand-magic-sparkles', color: 'var(--wi-accent)' },
+      { id: 'wi_ps_magic_entry', text: 'psycho缝合 v' + WI_VERSION, handler: togglePanel, icon: 'fa-solid fa-wand-magic-sparkles', color: 'var(--wi-accent)' },
     ];
 
     function bindClick($entry, handler) {
