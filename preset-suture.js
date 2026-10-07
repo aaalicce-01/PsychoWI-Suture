@@ -3,7 +3,7 @@
   // [HEADER] 实例管理 / 版本检测
   // ============================================================
   const WI_INSTANCE_ID = 'psychowi-preset-suture';
-  const WI_VERSION = '1.0.4';
+  const WI_VERSION = '1.1.0';
   const __wiInstanceInfo = { id: WI_INSTANCE_ID, version: WI_VERSION, ts: Date.now(), kill: null };
 
   // （自动更新检测已移除：改用动态 import + 时间戳，每次刷新自动拉最新）
@@ -119,7 +119,7 @@
   const err = (...args) => console.error('[psycho缝合]', ...args);
   const warn = (...args) => console.warn('[psycho缝合]', ...args);
 
-  function escapeHtml(s, maxLen = 800) {
+  function escapeHtml(s, maxLen = 999999) {
     let str = String(s ?? '');
     if (str.length > maxLen) str = str.slice(0, maxLen) + `\n…（已截断，原长 ${String(s ?? '').length} 字）`;
     return str.replace(/[&<>"']/g, c => ({
@@ -3766,7 +3766,7 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
               【${roundLabel}】${rIdx === 0 ? '首次诊断' : '追问'}
             </div>
             <div style="font-size:11px;color:var(--wi-text-dim);margin-bottom:6px;background:var(--wi-bg-0);padding:6px 8px;border-radius:4px;line-height:1.6">
-              <b style="color:var(--wi-text)">问题：</b>${escapeHtml(round.question && round.question.trim() ? round.question : '（整体体检）')}
+              <b style="color:var(--wi-text)">问题：</b>${escapeHtml(round.question && round.question.trim() ? round.question : '（整体体检）', 999999)}
               ${round.sample && round.sample.trim() ? `<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--wi-text-faint)">查看实际输出样本</summary><div style="margin-top:4px;white-space:pre-wrap;color:var(--wi-text-dim);font-family:monospace;font-size:10px;max-height:120px;overflow-y:auto">${escapeHtml(round.sample.slice(0, 1000))}${round.sample.length > 1000 ? '\n…（截断）' : ''}</div></details>` : ''}
             </div>
           </div>
@@ -3777,7 +3777,7 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
           html += `
             <div style="background:var(--wi-bg-1);border:1px solid var(--wi-border);border-radius:6px;padding:12px;margin-bottom:10px;margin-left:10px">
               <div style="font-size:12px;color:var(--wi-warn);font-weight:600;margin-bottom:6px">📋 诊断分析</div>
-              <div style="font-size:12px;color:var(--wi-text);line-height:1.8;white-space:pre-wrap">${escapeHtml(round.diagnosis)}</div>
+              <div style="font-size:12px;color:var(--wi-text);line-height:1.8;white-space:pre-wrap">${escapeHtml(round.diagnosis, 999999)}</div>
             </div>
           `;
         } else if (round.changes.length === 0 && rIdx > 0) {
@@ -6071,10 +6071,10 @@ ${zoneList}
             ${isSub ? '<span style="font-size:10px;color:var(--wi-warn);background:var(--wi-bg-2);padding:1px 5px;border-radius:3px">子规则 → ' + escapeHtml(r._cotParent) + '</span>' : ''}
             <span style="font-size:12px;color:var(--wi-text);font-weight:600">${escapeHtml(r.sourceName)}</span>
             <span style="color:var(--wi-text-faint);font-size:10px">→ ${escapeHtml(
-              state.sutureNameSuffix && r._sutureFrom && !/\[来自.+?\]\s*$/.test(r.entryName)
-                ? r.entryName + ' [来自' + r._sutureFrom + ']'
-                : r.entryName
-            )}</span>
+        state.sutureNameSuffix && r._sutureFrom && !/\[来自.+?\]\s*$/.test(r.entryName)
+          ? r.entryName + ' [来自' + r._sutureFrom + ']'
+          : r.entryName
+      )}</span>
           </div>
           <div style="font-size:11px;color:var(--wi-text-dim);line-height:1.7;margin-bottom:6px">
             <b style="color:var(--wi-ok)">zone：</b>${escapeHtml(r.zone)}${zoneOk ? '' : ' <span style="color:var(--wi-err)">（⚠️ 不在 zone 列表）</span>'}
