@@ -3,7 +3,7 @@
   // [HEADER] 实例管理 / 版本检测
   // ============================================================
   const WI_INSTANCE_ID = 'psychowi-preset-suture';
-  const WI_VERSION = '1.1.1';
+  const WI_VERSION = '1.1.2';
   const __wiInstanceInfo = { id: WI_INSTANCE_ID, version: WI_VERSION, ts: Date.now(), kill: null };
 
   // （自动更新检测已移除：改用动态 import + 时间戳，每次刷新自动拉最新）
@@ -2826,6 +2826,7 @@ ${blocks}
     #wi_ps_batch_continue_mask,
     #wi_ps_batch_error_mask,
     #wi_ps_migrate_mask,
+    #wi_ps_pick_group_mask,
     #wi_ps_loading_mask {
       ${WI_THEMES[themeName]}
       --wi-theme-name: "${themeName}";
@@ -2912,6 +2913,7 @@ ${blocks}
     #wi_ps_batch_continue_mask,
     #wi_ps_batch_error_mask,
     #wi_ps_migrate_mask,
+    #wi_ps_pick_group_mask,
     #wi_ps_loading_mask {
       position: absolute !important;
       inset: 0 !important;
@@ -4826,9 +4828,9 @@ B. 给出修改方案：明确指出要改哪些条目（改内容）或新增�
       });
 
       const $mask = $('<div id="' + MASK_ID + '">').css({
-        position: 'fixed', inset: 0, background: 'var(--wi-mask-strong)', zIndex: 1000060,
+        position: 'absolute', inset: 0, background: 'var(--wi-mask-strong)', zIndex: 1000060,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: '8px', boxSizing: 'border-box',
+        padding: '8px', boxSizing: 'border-box', overflowY: 'auto',
       });
       const $box = $('<div>').addClass('wi-ps-mobile-box').css({
         background: 'var(--wi-box-bg)', border: '1px solid var(--wi-border)', borderRadius: '10px',
